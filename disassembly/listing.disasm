@@ -1,0 +1,302 @@
+Disassembly Listing for pixdel3
+Generated From:
+C:/Microchip/pixdel3.X/dist/default/production/pixdel3.X.production.cof
+2013-03-06 13:12:04
+
+---  C:/Microchip/pixdel3.X/pixdel3.asm  ----------------------------------------------------------------
+                                                  1:     ;NOM: pixdel3.asm
+                                                  2:     ;DESCRIPTION: version 3 du pixdel (version simplifiée).
+                                                  3:     ;             LED RGB controlée par un PIC10F200 ou PIC10F202
+                                                  4:     ;             commandes reçues sur GP3 en format UART 8 bits, pas de parité, 1 stop.
+                                                  5:     ;
+                                                  6:     ;             format commande:
+                                                  7:     ;             0xAA id_pixdel r_level g_level b_level
+                                                  8:     ;             0xAA octet de synchronisation
+                                                  9:     ;             id_pixdel 0 = diffusion, id_unique 1-255
+                                                  10:    ;             r_level niveau de rouge 0-255
+                                                  11:    ;             g_level niveau de vert 0-255
+                                                  12:    ;             b_level niveau de bleu 0-255
+                                                  13:    ;
+                                                  14:    ;MCU: PIC10F200 ou 202
+                                                  15:    ;DATE: 2013-03-05
+                                                  16:    ;AUTEUR: Jacques Deschênes
+                                                  17:    ;
+                                                  18:    
+                                                  19:      include <P10F202.INC>
+                                                  20:    
+                                                  21:      __config _WDTE_OFF & _MCLRE_OFF
+                                                  22:    
+                                                  23:    ;;;;;;;;;;;;; constantes ;;;;;;;;;;;;;;
+                                                  24:    ;PIXDEL_ID EQU 1 ; 1-255 doit-être différent pour chaque pixdel
+                                                  25:    ; pour des raisons pratique PIXDEL_ID est maintenant défini sur comme macro
+                                                  26:    ; de ligne de commande mpasm.   mpasm -d PIXDEL_ID=n
+                                                  27:    ;
+                                                  28:    
+                                                  29:    BROADCAST EQU 0 ; identifiant message de diffusion
+                                                  30:    
+                                                  31:    OPTION_CFG EQU B'11000001' ; configuration registre OPTION
+                                                  32:    
+                                                  33:    RX_P EQU GP3 ; réception uart
+                                                  34:    TX_P EQU GP2 ; transmission uart
+                                                  35:    
+                                                  36:    SYNC EQU H'AA' ; octet de synchronisation réception uart
+                                                  37:    CMD_SIZE EQU 4 ; 4 octets par commande
+                                                  38:    
+                                                  39:    ; bits couleurs rgb dans GPIO
+                                                  40:    GREEN   EQU 0
+                                                  41:    RED     EQU 1
+                                                  42:    BLUE    EQU 2
+                                                  43:    
+                                                  44:    ; délais de bit pour 9600 BAUD
+                                                  45:    BDLY_9600 EQU D'104'-D'10'  ; -10 pour délais boucle induit.
+                                                  46:    HDLY_9600 EQU D'52' ; délais demi-bit
+                                                  47:    ;délais de bit pour 19200 BAUD
+                                                  48:    BDLY_19200 EQU D'52'-D'10'
+                                                  49:    HDLY_19200 EQU D'26'
+                                                  50:    ; délais de bit pour 38400 BAUD
+                                                  51:    BDLY_38400 EQU  D'26'-D'10'
+                                                  52:    HDLY_38400 EQU  D'12'
+                                                  53:    
+                                                  54:    BIT_DLY  EQU BDLY_19200
+                                                  55:    HALF_DLY EQU HDLY_19200
+                                                  56:    
+                                                  57:    ;;;;;;;;;;;;; macros ;;;;;;;;;;;;;;;;;;
+                                                  58:    #define RX GPIO, RX_P
+                                                  59:    #define TX GPIO, TX_P
+                                                  60:    
+                                                  61:    ; délais en micro-secondes basé sur un Tcy de 1usec.
+                                                  62:    ; délais maximal  3*255+2=767usec
+                                                  63:    delay_us macro usec
+                                                  64:      local q=(usec-2)/3
+                                                  65:      if q>0
+                                                  66:        movlw q
+                                                  67:        movwf delay_cntr
+                                                  68:        decfsz delay_cntr,F
+                                                  69:        goto $-1
+                                                  70:        nop
+                                                  71:        local r=(usec-2) % 3
+                                                  72:        while r>1
+                                                  73:          goto $+1
+                                                  74:          local r=r-2
+                                                  75:        endw
+                                                  76:        if r>0
+                                                  77:          nop
+                                                  78:        endif
+                                                  79:      else
+                                                  80:        while usec>1
+                                                  81:          goto $+1
+                                                  82:          usec=usec-2
+                                                  83:        endw
+                                                  84:        if usec>0
+                                                  85:          nop
+                                                  86:        endif
+                                                  87:      endif
+                                                  88:      endm
+                                                  89:    
+                                                  90:    ;;;;;;;;;;;;; variables ;;;;;;;;;;;;;;;
+                                                  91:      udata
+                                                  92:    uart_byte res 1 ; octet reçu sur entrée uart
+                                                  93:    delay_cntr res 1 ; compteur pour macro delay_us
+                                                  94:    pwm res 1  ; compteur pwm
+                                                  95:    dc_red res 1 ; rapport cyclique rouge
+                                                  96:    dc_blue res 1 ; rapport cyclique bleu
+                                                  97:    dc_green res 1 ; rappor cyclique vert
+                                                  98:    cmd_buff res 5 ; mémoire tampon réception des commandes
+                                                  99:    temp res 1 ; registre temporaire
+                                                  100:   
+                                                  101:   ;;;;;;;;;;;;; code ;;;;;;;;;;;;;;;;;;;;
+                                                  102:   
+                                                  103:   rst_vector org 0
+0000  0025     MOVWF OSCCAL                       104:     movwf OSCCAL
+0001  0A69     GOTO 0x69                          105:     goto init
+                                                  106:   
+                                                  107:   uart_rx
+                                                  108:   ; réception RS-232 TTL
+                                                  109:   ; sortie: carry bit=1 indique qu'un octet a été reçu
+                                                  110:   ;         octet reçu dans uart_byte
+0002  0403     BCF STATUS, 0x0                    111:     clrc
+0003  0666     BTFSC GPIO, 0x3                    112:     btfsc RX
+0004  0800     RETLW 0x0                          113:     return
+0005  0C80     MOVLW 0x80                         114:     movlw H'80'
+0006  0028     MOVWF 0x8                          115:     movwf uart_byte
+0007  0C08     MOVLW 0x8                          116:     delay_us HALF_DLY
+0008  0029     MOVWF delay_cntr
+0009  02E9     DECFSZ delay_cntr, F
+000A  0A09     GOTO 0x9
+000B  0000     NOP
+                                                  117:   rx_bit_loop
+000C  0C0D     MOVLW 0xD                          118:     delay_us BIT_DLY
+000D  0029     MOVWF delay_cntr
+000E  02E9     DECFSZ delay_cntr, F
+000F  0A0E     GOTO 0xE
+0010  0000     NOP
+0011  0000     NOP
+0012  0503     BSF STATUS, 0x0                    119:     setc
+0013  0766     BTFSS GPIO, 0x3                    120:     btfss RX
+0014  0403     BCF STATUS, 0x0                    121:     clrc
+0015  0328     RRF 0x8, F                         122:     rrf uart_byte, F
+0016  0A17     GOTO 0x17                          123:     goto $+1 ;pour avoir le même nombre de cycles dans la boucle la sous-routine tx
+0017  0703     BTFSS STATUS, 0x0                  124:     skpc
+0018  0A0C     GOTO 0xC                           125:     goto rx_bit_loop
+0019  0C0E     MOVLW 0xE                          126:     delay_us BIT_DLY + D'4'
+001A  0029     MOVWF delay_cntr
+001B  02E9     DECFSZ delay_cntr, F
+001C  0A1B     GOTO 0x1B
+001D  0000     NOP
+001E  0A1F     GOTO 0x1F
+001F  0503     BSF STATUS, 0x0                    127:     setc
+0020  0766     BTFSS GPIO, 0x3                    128:     btfss RX
+0021  0403     BCF STATUS, 0x0                    129:     clrc ;erreur réception devrait-être un stop bit.
+0022  0800     RETLW 0x0                          130:     return
+                                                  131:   
+                                                  132:   uart_tx
+                                                  133:   ; transmet octet [uart_byte]
+0023  0446     BCF GPIO, 0x2                      134:     bcf TX
+0024  0C0D     MOVLW 0xD                          135:     delay_us BIT_DLY
+0025  0029     MOVWF delay_cntr
+0026  02E9     DECFSZ delay_cntr, F
+0027  0A26     GOTO 0x26
+0028  0000     NOP
+0029  0000     NOP
+002A  0503     BSF STATUS, 0x0                    136:     setc
+                                                  137:   tx_bit_loop
+002B  0328     RRF 0x8, F                         138:     rrf uart_byte, F
+002C  0703     BTFSS STATUS, 0x0                  139:     skpc
+002D  0446     BCF GPIO, 0x2                      140:     bcf TX
+002E  0603     BTFSC STATUS, 0x0                  141:     skpnc
+002F  0546     BSF GPIO, 0x2                      142:     bsf TX
+0030  0C0D     MOVLW 0xD                          143:     delay_us BIT_DLY
+0031  0029     MOVWF delay_cntr
+0032  02E9     DECFSZ delay_cntr, F
+0033  0A32     GOTO 0x32
+0034  0000     NOP
+0035  0000     NOP
+0036  0403     BCF STATUS, 0x0                    144:     clrc
+0037  0228     MOVF 0x8, F                        145:     movf uart_byte, F
+0038  0743     BTFSS STATUS, 0x2                  146:     skpz
+0039  0A2B     GOTO 0x2B                          147:     goto tx_bit_loop
+003A  0800     RETLW 0x0                          148:     return
+                                                  149:   
+                                                  150:   rcv_cmd
+003B  0666     BTFSC GPIO, 0x3                    151:      btfsc RX
+003C  0800     RETLW 0x0                          152:      return
+003D  0902     CALL 0x2                           153:      call uart_rx
+003E  0703     BTFSS STATUS, 0x0                  154:      skpc
+003F  0800     RETLW 0x0                          155:      return
+0040  0CAA     MOVLW 0xAA                         156:      movlw SYNC
+0041  0188     XORWF 0x8, W                       157:      xorwf uart_byte, W
+0042  0743     BTFSS STATUS, 0x2                  158:      skpz
+0043  0800     RETLW 0x0                          159:      return
+0044  0C0E     MOVLW 0xE                          160:      movlw cmd_buff
+0045  0024     MOVWF FSR                          161:      movwf FSR
+0046  0C04     MOVLW 0x4                          162:      movlw CMD_SIZE ; nombre d'octets à recevoir
+0047  0033     MOVWF 0x13                         163:      movwf temp
+                                                  164:   rcv_next_byte
+0048  0666     BTFSC GPIO, 0x3                    165:      btfsc RX  ; attend start bit
+0049  0A48     GOTO 0x48                          166:      goto $-1
+004A  0902     CALL 0x2                           167:      call uart_rx
+004B  0703     BTFSS STATUS, 0x0                  168:      skpc
+004C  0800     RETLW 0x0                          169:      return  ; erreur réception commande annulée
+004D  0208     MOVF 0x8, W                        170:      movfw uart_byte
+004E  0020     MOVWF INDF                         171:      movwf INDF
+004F  02A4     INCF FSR, F                        172:      incf FSR, F
+0050  02F3     DECFSZ 0x13, F                     173:      decfsz temp, F
+0051  0A48     GOTO 0x48                          174:      goto rcv_next_byte
+0052  0954     CALL 0x54                          175:      call exec_cmd
+0053  0800     RETLW 0x0                          176:      return
+                                                  177:   
+                                                  178:   exec_cmd
+                                                  179:   ; traite la commande reçu dans uart_byte
+0054  0C0E     MOVLW 0xE                          180:       movlw cmd_buff
+0055  0024     MOVWF FSR                          181:       movwf FSR
+0056  0040     CLRW                               182:       clrw
+0057  0180     XORWF INDF, W                      183:       xorwf INDF, W
+0058  0643     BTFSC STATUS, 0x2                  184:       skpnz
+0059  0A5E     GOTO 0x5E                          185:       goto accept_cmd ; message de diffusion
+005A  0C01     MOVLW 0x1                          186:       movlw PIXDEL_ID
+005B  0180     XORWF INDF, W                      187:       xorwf INDF, W
+005C  0743     BTFSS STATUS, 0x2                  188:       skpz   ; pixdel_id correspondant à ce pixdel
+005D  0800     RETLW 0x0                          189:       return ; pas concerné.
+                                                  190:   accept_cmd ; transfert des rapports cycliques dans les variables
+005E  02A4     INCF FSR, F                        191:       incf FSR, F
+005F  0200     MOVF INDF, W                       192:       movfw INDF
+0060  002B     MOVWF 0xB                          193:       movwf dc_red
+0061  02A4     INCF FSR, F                        194:       incf FSR, F
+0062  0200     MOVF INDF, W                       195:       movfw INDF
+0063  002D     MOVWF 0xD                          196:       movwf dc_green
+0064  02A4     INCF FSR, F                        197:       incf FSR, F
+0065  0200     MOVF INDF, W                       198:       movfw INDF
+0066  002C     MOVWF 0xC                          199:       movwf dc_blue
+0067  006A     CLRF 0xA                           200:       clrf pwm
+0068  0800     RETLW 0x0                          201:       return
+                                                  202:   
+                                                  203:   
+                                                  204:   
+                                                  205:   ;;;;;;;;;;;; initialisation MCU ;;;;;;;
+                                                  206:   init
+0069  0405     BCF OSCCAL, 0x0                    207:     BCF OSCCAL, FOSC4
+006A  0CC1     MOVLW 0xC1                         208:     movlw OPTION_CFG
+006B  0002     OPTION                             209:     option
+006C  0040     CLRW                               210:     clrw
+006D  0006     TRIS GPIO                          211:     tris GPIO
+006E  0C08     MOVLW 0x8                          212:     movlw 8
+                                                  213:   clear_ram
+006F  0024     MOVWF FSR                          214:     movwf FSR
+0070  0060     CLRF INDF                          215:     clrf INDF
+0071  02A4     INCF FSR, F                        216:     incf FSR, F
+0072  07A4     BTFSS FSR, 0x5                     217:     btfss FSR, 5
+0073  0A6F     GOTO 0x6F                          218:     goto clear_ram
+0074  0526     BSF GPIO, 0x1                      219:     bsf GPIO, RED
+0075  0506     BSF GPIO, 0x0                      220:     bsf GPIO, GREEN
+0076  0546     BSF GPIO, 0x2                      221:     bsf GPIO, BLUE
+0077  0CFF     MOVLW 0xFF                         222:     movlw D'255'
+0078  0033     MOVWF 0x13                         223:     movwf temp
+0079  0061     CLRF TMR0                          224:     clrf TMR0
+007A  0CFA     MOVLW 0xFA                         225:     movlw D'250'
+007B  0081     SUBWF TMR0, W                      226:     subwf TMR0, W
+007C  0703     BTFSS STATUS, 0x0                  227:     skpc
+007D  0A7A     GOTO 0x7A                          228:     goto $-3
+007E  02F3     DECFSZ 0x13, F                     229:     decfsz temp, F
+007F  0A79     GOTO 0x79                          230:     goto $-6
+0080  0066     CLRF GPIO                          231:     clrf GPIO
+                                                  232:   
+                                                  233:   ;;;;;;;;;;;; boucle principale ;;;;;;;;
+                                                  234:   main
+0081  0766     BTFSS GPIO, 0x3                    235:       btfss RX
+0082  093B     CALL 0x3B                          236:       call rcv_cmd
+0083  02AA     INCF 0xA, F                        237:       incf pwm, F
+0084  0073     CLRF 0x13                          238:       clrf temp
+                                                  239:   red_channel
+0085  020A     MOVF 0xA, W                        240:       movfw pwm
+0086  0743     BTFSS STATUS, 0x2                  241:       skpz
+0087  008B     SUBWF 0xB, W                       242:       subwf dc_red, W
+0088  0603     BTFSC STATUS, 0x0                  243:       skpnc
+0089  0533     BSF 0x13, 0x1                      244:       bsf temp, RED
+                                                  245:   green_channel
+008A  020A     MOVF 0xA, W                        246:       movfw pwm
+008B  0743     BTFSS STATUS, 0x2                  247:       skpz
+008C  008D     SUBWF 0xD, W                       248:       subwf dc_green, W
+008D  0603     BTFSC STATUS, 0x0                  249:       skpnc
+008E  0513     BSF 0x13, 0x0                      250:       bsf temp, GREEN
+                                                  251:   blue_channel
+008F  020A     MOVF 0xA, W                        252:       movfw pwm
+0090  0743     BTFSS STATUS, 0x2                  253:       skpz
+0091  008C     SUBWF 0xC, W                       254:       subwf dc_blue, W
+0092  0603     BTFSC STATUS, 0x0                  255:       skpnc
+0093  0553     BSF 0x13, 0x2                      256:       bsf temp, BLUE
+0094  0213     MOVF 0x13, W                       257:       movfw temp
+0095  0026     MOVWF GPIO                         258:       movwf GPIO
+0096  0A81     GOTO 0x81                          259:       goto main
+                                                  260:   
+0FFF  0000     NOP                                261:       end
+                                                  262:   
+                                                  263:   
+                                                  264:   
+                                                  265:   
+                                                  266:   
+                                                  267:   
+                                                  268:   
+                                                  269:   
+                                                  270:   
+                                                  271:   
+                                                  272:   
